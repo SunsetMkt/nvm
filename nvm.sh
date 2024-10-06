@@ -128,7 +128,12 @@ nvm_download() {
     if nvm_curl_use_compression; then
       CURL_COMPRESSED_FLAG="--compressed"
     fi
-    eval "curl -q --fail ${CURL_COMPRESSED_FLAG:-} ${CURL_HEADER_FLAG:-} $*"
+    local NVM_DOWNLOAD_ARGS
+    NVM_DOWNLOAD_ARGS=''
+    for arg in "$@"; do
+      NVM_DOWNLOAD_ARGS="${NVM_DOWNLOAD_ARGS} \"$arg\""
+    done
+    eval "curl -q --fail ${CURL_COMPRESSED_FLAG:-} ${CURL_HEADER_FLAG:-} ${NVM_DOWNLOAD_ARGS}"
   elif nvm_has "wget"; then
     # Emulate curl with wget
     ARGS=$(nvm_echo "$@" | command sed -e 's/--progress-bar /--progress=bar /' \
@@ -695,10 +700,12 @@ nvm_ensure_version_installed() {
       nvm_err "N/A: version \"${PREFIXED_VERSION:-$PROVIDED_VERSION}\" is not yet installed."
     fi
     nvm_err ""
-    if [ "${IS_VERSION_FROM_NVMRC}" != '1' ]; then
-        nvm_err "You need to run \`nvm install ${PROVIDED_VERSION}\` to install and use it."
-      else
-        nvm_err 'You need to run `nvm install` to install and use the node version specified in `.nvmrc`.'
+    if [ "${PROVIDED_VERSION}" = 'lts' ]; then
+      nvm_err '`lts` is not an alias - you may need to run `nvm install --lts` to install and `nvm use --lts` to use it.'
+    elif [ "${IS_VERSION_FROM_NVMRC}" != '1' ]; then
+      nvm_err "You need to run \`nvm install ${PROVIDED_VERSION}\` to install and use it."
+    else
+      nvm_err 'You need to run `nvm install` to install and use the node version specified in `.nvmrc`.'
     fi
     return 1
   fi
@@ -886,6 +893,10 @@ nvm_normalize_lts() {
       fi
     ;;
     *)
+      if [ "${LTS}" != "$(echo "${LTS}" | command tr '[:upper:]' '[:lower:]')" ]; then
+        nvm_err 'LTS names must be lowercase'
+        return 3
+      fi
       nvm_echo "${LTS}"
     ;;
   esac
@@ -1244,7 +1255,9 @@ nvm_alias() {
     nvm_err 'An alias is required.'
     return 1
   fi
-  ALIAS="$(nvm_normalize_lts "${ALIAS}")"
+  if ! ALIAS="$(nvm_normalize_lts "${ALIAS}")"; then
+    return $?
+  fi
 
   if [ -z "${ALIAS}" ]; then
     return 2
@@ -1647,7 +1660,9 @@ $VERSION_LIST
 EOF
 
   if [ -n "${LTS-}" ]; then
-    LTS="$(nvm_normalize_lts "lts/${LTS}")"
+    if ! LTS="$(nvm_normalize_lts "lts/${LTS}")"; then
+      return $?
+    fi
     LTS="${LTS#lts/}"
   fi
 
@@ -2194,7 +2209,7 @@ nvm_install_binary_extract() {
   command mkdir -p "${VERSION_PATH}" || return 1
 
   if [ "${NVM_OS}" = 'win' ]; then
-    command mv "${TMPDIR}/"*/* "${VERSION_PATH}" || return 1
+    command mv "${TMPDIR}/"*/* "${VERSION_PATH}/" || return 1
     command chmod +x "${VERSION_PATH}"/node.exe || return 1
     command chmod +x "${VERSION_PATH}"/npm || return 1
     command chmod +x "${VERSION_PATH}"/npx 2>/dev/null
@@ -2273,8 +2288,8 @@ nvm_install_binary() {
 
   # Read nosource from arguments
   if [ "${nosource-}" = '1' ]; then
-      nvm_err 'Binary download failed. Download from source aborted.'
-      return 0
+    nvm_err 'Binary download failed. Download from source aborted.'
+    return 0
   fi
 
   nvm_err 'Binary download failed, trying source.'
@@ -2917,11 +2932,11 @@ nvm_is_natural_num() {
 
 nvm_write_nvmrc() {
   local VERSION_STRING
-  VERSION_STRING=$(nvm_version "${1-$VERSION_STRING}")
-  if [ "$VERSION_STRING" = '∞' ] || [ "$VERSION_STRING" = 'N/A' ]; then
+  VERSION_STRING=$(nvm_version "${1-}")
+  if [ "${VERSION_STRING}" = '∞' ] || [ "${VERSION_STRING}" = 'N/A' ]; then
     return 1
   fi
-  echo "$VERSION_STRING" | tee "$PWD"/.nvmrc > /dev/null || {
+  echo "${VERSION_STRING}" | tee "$PWD"/.nvmrc > /dev/null || {
     if [ "${NVM_SILENT:-0}" -ne 1 ]; then
       nvm_err "Warning: Unable to write version number ($VERSION_STRING) to .nvmrc"
     fi
@@ -3412,9 +3427,11 @@ nvm() {
         ;;
       esac
 
+      local EXIT_CODE
       VERSION="$(NVM_VERSION_ONLY=true NVM_LTS="${LTS-}" nvm_remote_version "${provided_version}")"
+      EXIT_CODE="$?"
 
-      if [ "${VERSION}" = 'N/A' ]; then
+      if [ "${VERSION}" = 'N/A' ] || [ $EXIT_CODE -ne 0 ]; then
         local LTS_MSG
         local REMOTE_CMD
         if [ "${LTS-}" = '*' ]; then
@@ -3423,6 +3440,10 @@ nvm() {
         elif [ -n "${LTS-}" ]; then
           LTS_MSG="(with LTS filter '${LTS}') "
           REMOTE_CMD="nvm ls-remote --lts=${LTS}"
+          if [ -z "${provided_version}" ]; then
+            nvm_err "Version with LTS filter '${LTS}' not found - try \`${REMOTE_CMD}\` to browse available versions."
+            return 3
+          fi
         else
           REMOTE_CMD='nvm ls-remote'
         fi
@@ -3487,7 +3508,6 @@ nvm() {
         FLAVOR="$(nvm_node_prefix)"
       fi
 
-      local EXIT_CODE
       EXIT_CODE=0
 
       if nvm_is_version_installed "${VERSION}"; then
@@ -4391,7 +4411,7 @@ nvm() {
       NVM_VERSION_ONLY=true NVM_LTS="${NVM_LTS-}" nvm_remote_version "${PATTERN:-node}"
     ;;
     "--version" | "-v")
-      nvm_echo '0.40.0'
+      nvm_echo '0.40.1'
     ;;
     "unload")
       nvm deactivate >/dev/null 2>&1
@@ -4559,7 +4579,7 @@ nvm_auto() {
 
   case "${NVM_MODE}" in
     none) return 0 ;;
-    use | install)
+    use)
       local VERSION
       local NVM_CURRENT
       NVM_CURRENT="$(nvm_ls_current)"
@@ -4567,23 +4587,26 @@ nvm_auto() {
         VERSION="$(nvm_resolve_local_alias default 2>/dev/null || nvm_echo)"
         if [ -n "${VERSION}" ]; then
           if [ "_${VERSION}" != '_N/A' ] && nvm_is_valid_version "${VERSION}"; then
-            if [ "_${NVM_MODE}" = '_install' ]; then
-              nvm install "${VERSION}" >/dev/null
-            else
-              nvm use --silent "${VERSION}" >/dev/null
-            fi
+            nvm use --silent "${VERSION}" >/dev/null
           else
             return 0
           fi
         elif nvm_rc_version >/dev/null 2>&1; then
-          if [ "_${NVM_MODE}" = '_install' ]; then
-            nvm install >/dev/null
-          else
-            nvm use --silent >/dev/null
-          fi
+          nvm use --silent >/dev/null
         fi
       else
         nvm use --silent "${NVM_CURRENT}" >/dev/null
+      fi
+    ;;
+    install)
+      local VERSION
+      VERSION="$(nvm_alias default 2>/dev/null || nvm_echo)"
+      if [ -n "${VERSION}" ] && [ "_${VERSION}" != '_N/A' ] && nvm_is_valid_version "${VERSION}"; then
+        nvm install "${VERSION}" >/dev/null
+      elif nvm_rc_version >/dev/null 2>&1; then
+        nvm install >/dev/null
+      else
+        return 0
       fi
     ;;
     *)
